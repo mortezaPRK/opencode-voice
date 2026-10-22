@@ -445,10 +445,11 @@ The `leader` key's active chord is `ctrl+x` by default (configurable via
 3. LLM normalizes the transcription: fixes punctuation, removes filler words,
    corrects software engineering homophones ("Jason" to "JSON", "bullion" to
    "boolean", etc.)
-4. Cleaned text is appended to the OpenCode prompt, or submitted immediately
-   when `/stt-submit` is used. If normalization fails (e.g. the configured LLM
-   backend is unreachable), the raw transcription is used as a fallback so you
-   never lose your input
+4. Cleaned text is submitted after confirmation, or immediately when
+   `/stt-submit` is used. From the home screen, the plugin creates and opens a
+   session using the selected model. Cancelling confirmation creates no session.
+   If normalization fails (e.g. the configured LLM backend is unreachable), the
+   raw transcription is used as a fallback.
 
 ### TTS pipeline
 

@@ -598,16 +598,12 @@ async function transcribeApi(voice: VoiceState, logger: Logger): Promise<Transcr
 // V2 has no composer-set API exposing staged prompt edits, so transcribed text
 // is submitted directly to the focused session. For the review (non-submit)
 // path we confirm first so the user can cancel before sending.
-async function sendTranscription(
+export async function sendTranscription(
   ctx: Context,
   text: string,
   submit: boolean,
   toast: Toast,
 ): Promise<boolean> {
-  const sessionID = getActiveSessionID(ctx);
-  if (!sessionID) {
-    throw new Error("No active session to submit to");
-  }
   if (!submit) {
     const ok = await ctx.ui.dialog
       .confirm({
@@ -620,6 +616,28 @@ async function sendTranscription(
       toast("Transcription cancelled");
       return false;
     }
+  }
+  let sessionID = getActiveSessionID(ctx);
+  if (!sessionID) {
+    if (ctx.ui.router.current().type !== "home") {
+      throw new Error("Open a session or the home screen to submit voice input");
+    }
+    const location = ctx.location ?? ctx.data.location.default();
+    const selected = ctx.ui.model.current();
+    const session = await ctx.client.session.create({
+      ...(location ? { location: { directory: location.directory } } : {}),
+      ...(selected
+        ? {
+            model: {
+              providerID: selected.providerID,
+              id: selected.modelID,
+              ...(selected.variant ? { variant: selected.variant } : {}),
+            },
+          }
+        : {}),
+    });
+    sessionID = session.id;
+    ctx.ui.router.navigate({ type: "session", sessionID });
   }
   await ctx.client.session.prompt({ sessionID, text });
   return true;
@@ -673,9 +691,10 @@ async function doTranscribePipeline(
       return;
     }
 
-    await sendTranscription(ctx, llmResult.text, submit, toast);
+    const sent = await sendTranscription(ctx, llmResult.text, submit, toast);
+    if (!sent) return;
     logger.log("STT", `Pipeline completed normalizedChars=${llmResult.text.length}`, "debug");
-    toast(submit ? "Transcription submitted" : "Transcription added to prompt", "success");
+    toast("Transcription submitted", "success");
   } catch (err) {
     logger.log("STT", `Pipeline error: ${(err as Error).message}`, "error");
     toast(`STT error: ${(err as Error).message}`, "error");
