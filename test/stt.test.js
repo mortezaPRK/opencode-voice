@@ -10,7 +10,7 @@ import {
   isWSL,
   parsePactlSources,
   parsePactlSourcesShort,
-} from "../lib/stt.js";
+} from "../dist/lib/stt.js";
 
 test("detects OpenRouter STT endpoints", () => {
   assert.equal(isOpenRouterEndpoint("https://openrouter.ai/api/v1"), true);
