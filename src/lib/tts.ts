@@ -1,21 +1,25 @@
 // Text-to-speech: LLM normalization, Piper synthesis, sox playback.
-//
-// V2 port. Pure Piper/playback logic is unchanged; only the API wiring changed:
-//   - api.kv                    -> ctx.storage store (voice/setVoice)
-//   - api.ui.toast              -> ctx.ui.toast.show
-//   - api.ui.dialog.replace     -> await ctx.ui.dialog.select
-//   - api.event.on              -> ctx.data.on (V2 event names)
-//   - api.route.current/state   -> ctx.data.session.* + ctx.ui.router.current
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { getActiveSessionID, getSessionTitle, getTurnAssistantText } from "./session.js";
+import type {
+  CommandModule,
+  Complete,
+  Context,
+  KeymapCommand,
+  Logger,
+  Prompts,
+  ToastVariant,
+  VoiceState,
+  VoiceStore,
+} from "../types.js";
 
 const VOICES_DIR = path.join(os.homedir(), ".local", "share", "piper-voices");
 
-const TTS_VOICES = {
+const TTS_VOICES: Record<string, { label: string; file: string }> = {
   ryan: { label: "Ryan (high)", file: "en_US-ryan-high.onnx" },
   bryce: { label: "Bryce (medium)", file: "en_US-bryce-medium.onnx" },
 };
@@ -66,40 +70,59 @@ Rules:
 
 // ---- Session helpers ----
 
-function extractSessionID(event) {
-  return event?.data?.sessionID ?? event?.sessionID ?? event?.properties?.sessionID ?? null;
+function extractSessionID(event: unknown): string | null {
+  const e = event as {
+    data?: { sessionID?: string };
+    sessionID?: string;
+    properties?: { sessionID?: string };
+  };
+  return e?.data?.sessionID ?? e?.sessionID ?? e?.properties?.sessionID ?? null;
 }
 
 // ---- Public API for V2 CLI plugin ----
 
-export function registerTTS(ctx, complete, prompts, store, logger) {
+export interface TTSModule extends CommandModule {
+  subscribe: () => Array<() => void>;
+}
+
+export function registerTTS(
+  ctx: Context,
+  complete: Complete,
+  prompts: Prompts,
+  store: VoiceStore,
+  logger: Logger,
+): TTSModule {
   const { voice, setVoice } = store;
   const systemAuto = prompts?.ttsAuto || SYSTEM_AUTO;
   const systemManual = prompts?.ttsManual || SYSTEM_MANUAL;
 
-  function toast(message, variant = "info") {
+  function toast(message: string, variant: ToastVariant = "info"): void {
     ctx.ui.toast.show({ message, variant, duration: 3000 });
   }
 
-  function getVoiceModel() {
-    const cur = voice.ttsVoice || DEFAULT_TTS_VOICE;
-    const entry = TTS_VOICES[cur] || TTS_VOICES[DEFAULT_TTS_VOICE];
-    return path.join(VOICES_DIR, entry.file);
+  function getVoiceEntry(): { label: string; file: string } {
+    const current = voice.ttsVoice || DEFAULT_TTS_VOICE;
+    return TTS_VOICES[current] || TTS_VOICES[DEFAULT_TTS_VOICE];
   }
 
-  function getVoiceLabel() {
-    const cur = voice.ttsVoice || DEFAULT_TTS_VOICE;
-    const entry = TTS_VOICES[cur] || TTS_VOICES[DEFAULT_TTS_VOICE];
-    return entry.label;
+  function getVoiceModel(): string {
+    return path.join(VOICES_DIR, getVoiceEntry().file);
   }
 
-  function piperOnPath() {
+  function getVoiceLabel(): string {
+    return getVoiceEntry().label;
+  }
+
+  function piperOnPath(): boolean {
     const pathDirs = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
     return pathDirs.some((dir) => fs.existsSync(path.join(dir, "piper")));
   }
 
-  async function normalizeForSpeech(text, systemPrompt) {
-    logger?.log?.("TTS", `Normalizing speech chars=${text.length}`, "debug");
+  async function normalizeForSpeech(
+    text: string,
+    systemPrompt: string,
+  ): Promise<{ text: string | null; error?: string }> {
+    logger.log("TTS", `Normalizing speech chars=${text.length}`, "debug");
     return complete({
       system: systemPrompt,
       prompt: `Convert for text-to-speech:\n\n${text}`,
@@ -109,10 +132,10 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
 
   // ---- Audio pipeline ----
 
-  let piperProc = null;
-  let playProc = null;
+  let piperProc: ChildProcess | null = null;
+  let playProc: ChildProcess | null = null;
 
-  function killProcs() {
+  function killProcs(): void {
     if (piperProc) {
       try {
         piperProc.kill("SIGKILL");
@@ -127,7 +150,7 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
     }
   }
 
-  function speak(text) {
+  function speak(text: string): Promise<void> {
     if (!text) return Promise.resolve();
     const line = text.replace(/\n/g, " ").trim();
     if (!line) return Promise.resolve();
@@ -135,14 +158,14 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
     killProcs();
 
     const voiceModel = getVoiceModel();
-    logger?.log?.("TTS", `Speak requested chars=${line.length} voice=${voiceModel}`, "debug");
+    logger.log("TTS", `Speak requested chars=${line.length} voice=${voiceModel}`, "debug");
     if (!piperOnPath()) {
-      logger?.log?.("TTS", `Piper binary not found on PATH`, "warn");
+      logger.log("TTS", `Piper binary not found on PATH`, "warn");
       toast(`Piper binary not found on PATH`, "warning");
       return Promise.resolve();
     }
     if (!fs.existsSync(voiceModel)) {
-      logger?.log?.("TTS", `Voice model not found: ${voiceModel}`, "warn");
+      logger.log("TTS", `Voice model not found: ${voiceModel}`, "warn");
       toast(`Voice model not found: ${voiceModel}`, "warning");
       return Promise.resolve();
     }
@@ -150,7 +173,7 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
     return new Promise((resolve) => {
       let piperStderr = "";
       let playStderr = "";
-      playProc = spawn(
+      const play = spawn(
         "play",
         [
           "-t",
@@ -168,74 +191,80 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
         ],
         { stdio: ["pipe", "ignore", "pipe"] },
       );
+      playProc = play;
 
-      piperProc = spawn("piper", ["-m", voiceModel, "--output_raw"], {
+      const piper = spawn("piper", ["-m", voiceModel, "--output_raw"], {
         stdio: ["pipe", "pipe", "pipe"],
       });
+      piperProc = piper;
 
-      piperProc.stderr.on("data", (chunk) => {
+      piper.stderr?.on("data", (chunk: Buffer) => {
         piperStderr += chunk.toString();
       });
-      playProc.stderr.on("data", (chunk) => {
+      play.stderr?.on("data", (chunk: Buffer) => {
         playStderr += chunk.toString();
       });
 
-      piperProc.stdout.on("data", (chunk) => {
-        if (playProc?.stdin && !playProc.stdin.destroyed) {
-          playProc.stdin.write(chunk);
+      piper.stdout?.on("data", (chunk: Buffer) => {
+        if (play.stdin && !play.stdin.destroyed) {
+          play.stdin.write(chunk);
         }
       });
 
-      piperProc.on("close", (code) => {
+      piper.on("close", (code: number | null) => {
         if (code !== 0 && code !== null) {
-          logger?.log?.("TTS", `piper exited code=${code} stderr=${piperStderr.trim()}`, "error");
+          logger.log("TTS", `piper exited code=${code} stderr=${piperStderr.trim()}`, "error");
         }
-        if (playProc?.stdin && !playProc.stdin.destroyed) {
-          playProc.stdin.end();
+        if (play.stdin && !play.stdin.destroyed) {
+          play.stdin.end();
         }
       });
 
-      playProc.on("close", (code) => {
+      play.on("close", (code: number | null) => {
         if (code !== 0 && code !== null) {
-          logger?.log?.("TTS", `play exited code=${code} stderr=${playStderr.trim()}`, "error");
+          logger.log("TTS", `play exited code=${code} stderr=${playStderr.trim()}`, "error");
         } else {
-          logger?.log?.("TTS", "playback finished", "debug");
+          logger.log("TTS", "playback finished", "debug");
         }
         piperProc = null;
         playProc = null;
         resolve();
       });
 
-      piperProc.on("error", (err) => {
-        logger?.log?.("TTS", `piper error: ${err.message}`, "error");
+      piper.on("error", (err: Error) => {
+        logger.log("TTS", `piper error: ${err.message}`, "error");
         killProcs();
         resolve();
       });
-      playProc.on("error", (err) => {
-        logger?.log?.("TTS", `play error: ${err.message}`, "error");
+      play.on("error", (err: Error) => {
+        logger.log("TTS", `play error: ${err.message}`, "error");
         killProcs();
         resolve();
       });
 
-      if (piperProc?.stdin && !piperProc.stdin.destroyed) {
-        piperProc.stdin.write(line + "\n");
-        piperProc.stdin.end();
+      if (piper.stdin && !piper.stdin.destroyed) {
+        piper.stdin.write(line + "\n");
+        piper.stdin.end();
       }
     });
   }
 
   // ---- Session-prefixed announcements ----
 
-  async function speakWithSessionPrefix(sessionID, message, suffix) {
+  async function speakWithSessionPrefix(
+    sessionID: string | null,
+    message: string,
+    suffix?: string,
+  ): Promise<void> {
     const sessionTitle = await getSessionTitle(ctx, sessionID);
-    const parts = [];
+    const parts: string[] = [];
     if (sessionTitle) parts.push(`Session: ${sessionTitle}.`);
     parts.push(message);
     if (suffix) parts.push(suffix);
     await speak(parts.join(" "));
   }
 
-  function stopSpeech() {
+  function stopSpeech(): boolean {
     const wasPlaying = piperProc !== null || playProc !== null;
     killProcs();
     return wasPlaying;
@@ -243,7 +272,7 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
 
   // ---- Manual mode ----
 
-  async function speakLastResponse() {
+  async function speakLastResponse(): Promise<void> {
     const sessionID = getActiveSessionID(ctx);
     const result = await getTurnAssistantText(ctx, sessionID);
     if (!result || !result.text) {
@@ -254,23 +283,23 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
     toast("Normalizing response...");
     const llmResult = await normalizeForSpeech(result.text, systemManual);
     if (!llmResult.text) {
-      logger?.log?.("TTS", `Manual normalization failed: ${llmResult.error}`, "warn");
+      logger.log("TTS", `Manual normalization failed: ${llmResult.error}`, "warn");
       toast(`TTS normalization failed: ${llmResult.error}`, "warning");
       return;
     }
 
-    logger?.log?.("TTS", `Manual normalization succeeded chars=${llmResult.text.length}`, "debug");
+    logger.log("TTS", `Manual normalization succeeded chars=${llmResult.text.length}`, "debug");
     toast("Speaking last response");
     await speak(llmResult.text);
   }
 
   // ---- Auto mode ----
 
-  let lastSpokenMessageID = null;
+  let lastSpokenMessageID: string | null = null;
 
   // Triggered once per completed agent execution, so auto-TTS fires only after
   // a real turn (a genuine assistant response) rather than on the initial idle.
-  async function speakAuto(sessionID) {
+  async function speakAuto(sessionID: string | null): Promise<void> {
     if (voice.ttsMode !== "on") return;
 
     const result = await getTurnAssistantText(ctx, sessionID);
@@ -282,60 +311,53 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
     toast("Normalizing response...");
     const llmResult = await normalizeForSpeech(result.text, systemAuto);
     if (!llmResult.text) {
-      logger?.log?.("TTS", `Auto normalization failed: ${llmResult.error}`, "warn");
+      logger.log("TTS", `Auto normalization failed: ${llmResult.error}`, "warn");
       toast(`TTS normalization failed: ${llmResult.error}`, "warning");
       return;
     }
 
-    logger?.log?.("TTS", `Auto normalization succeeded chars=${llmResult.text.length}`, "debug");
+    logger.log("TTS", `Auto normalization succeeded chars=${llmResult.text.length}`, "debug");
     await speakWithSessionPrefix(sessionID, llmResult.text, "Ready for your input.");
   }
 
-  function subscribe() {
-    const stops = [];
+  function subscribe(): Array<() => void> {
+    const stops: Array<() => void> = [];
 
-    // V2 confirmed event: fires when an agent execution completes.
+    // Fires when an agent execution completes (a real assistant turn).
     stops.push(
-      ctx.data.on("session.execution.succeeded", (event) => {
+      ctx.data.on("session.execution.succeeded", (event: unknown) => {
         const sessionID = extractSessionID(event);
         if (!sessionID) return;
         void speakAuto(sessionID);
       }),
     );
 
-    // V2 confirmed event (same name as V1).
     stops.push(
-      ctx.data.on("permission.asked", (event) => {
+      ctx.data.on("permission.asked", (event: unknown) => {
         if (voice.ttsMode !== "on") return;
         const sessionID = extractSessionID(event);
         void speakWithSessionPrefix(sessionID, "Permission requested. Please check your screen.");
       }),
     );
 
-    // Question/input announcements. The exact V2 event name for a pending
-    // question was not confirmed at port time; subscribe defensively so a
-    // mismatched name logs a warning instead of breaking plugin setup.
-    try {
-      stops.push(
-        ctx.data.on("session.form.updated", (event) => {
-          if (voice.ttsMode !== "on") return;
-          const sessionID = extractSessionID(event);
-          void speakWithSessionPrefix(
-            sessionID,
-            "A question needs your answer. Please check your screen.",
-          );
-        }),
-      );
-    } catch (err) {
-      logger?.log?.("TTS", `question event subscription skipped: ${err.message}`, "warn");
-    }
+    // Question/input announcements: a form was created that needs an answer.
+    stops.push(
+      ctx.data.on("form.created", (event: unknown) => {
+        if (voice.ttsMode !== "on") return;
+        const sessionID = extractSessionID(event);
+        void speakWithSessionPrefix(
+          sessionID,
+          "A question needs your answer. Please check your screen.",
+        );
+      }),
+    );
 
     return stops;
   }
 
   // ---- Commands ----
 
-  const commands = [
+  const commands: KeymapCommand[] = [
     {
       id: "tts.speak-last",
       title: "TTS: speak last response",
@@ -345,7 +367,7 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
       palette: true,
       slash: { name: "tts-speak" },
       run() {
-        speakLastResponse();
+        void speakLastResponse();
       },
     },
     {
@@ -359,8 +381,8 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
       run() {
         const current = voice.ttsMode || "off";
         const next = current === "on" ? "off" : "on";
-        setVoice((d) => {
-          d.ttsMode = next;
+        setVoice((draft) => {
+          draft.ttsMode = next;
         });
         if (next === "off") stopSpeech();
         toast(next === "on" ? `TTS on (${getVoiceLabel()})` : "TTS off");
@@ -390,23 +412,25 @@ export function registerTTS(ctx, complete, prompts, store, logger) {
         const selected = await ctx.ui.dialog.select({
           title: "Select voice",
           current,
-          options: Object.entries(TTS_VOICES).map(([key, v]) => ({
-            title: v.label,
+          options: Object.entries(TTS_VOICES).map(([key, value]) => ({
+            title: value.label,
             value: key,
           })),
         });
         if (selected === undefined) return;
-        setVoice((d) => {
-          d.ttsVoice = selected;
+        setVoice((draft) => {
+          draft.ttsVoice = selected;
         });
         toast(`Voice: ${TTS_VOICES[selected].label}`);
       },
     },
   ];
 
-  function cleanup() {
+  function cleanup(): void {
     killProcs();
   }
 
   return { commands, subscribe, cleanup };
 }
+
+export type { VoiceState };

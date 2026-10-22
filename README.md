@@ -31,10 +31,10 @@ This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
       "options": {
         "endpoint": "https://api.anthropic.com/v1",
         "model": "claude-haiku-4-5",
-        "apiKeyEnv": "ANTHROPIC_API_KEY"
-      }
-    }
-  ]
+        "apiKeyEnv": "ANTHROPIC_API_KEY",
+      },
+    },
+  ],
 }
 ```
 
@@ -42,6 +42,7 @@ This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
 > **Keybind conflict.** This plugin uses `ctrl+r` for voice recording, which
 > OpenCode assigns to session rename by default. To let the plugin keep
 > `ctrl+r`, disable the conflicting binding in `cli.json`:
+>
 > ```json
 > {
 >   "keybinds": { "session.rename": "none" }
@@ -251,10 +252,10 @@ endpoints like Ollama.
       "options": {
         "endpoint": "https://api.anthropic.com/v1",
         "model": "claude-haiku-4-5",
-        "apiKeyEnv": "ANTHROPIC_API_KEY"
-      }
-    }
-  ]
+        "apiKeyEnv": "ANTHROPIC_API_KEY",
+      },
+    },
+  ],
 }
 ```
 
@@ -267,10 +268,10 @@ For unauthenticated local endpoints (e.g. Ollama):
       "package": "@mortz.prk/opencode-voice",
       "options": {
         "endpoint": "http://localhost:11434/v1",
-        "model": "llama3.2"
-      }
-    }
-  ]
+        "model": "llama3.2",
+      },
+    },
+  ],
 }
 ```
 
@@ -306,10 +307,10 @@ plugin on a machine without whisper-cpp installed.
       "options": {
         "sttEndpoint": "http://127.0.0.1:8000/v1",
         "sttModel": "whisper-large-v3-turbo",
-        "sttApiKeyEnv": "MY_STT_API_KEY"
-      }
-    }
-  ]
+        "sttApiKeyEnv": "MY_STT_API_KEY",
+      },
+    },
+  ],
 }
 ```
 
@@ -333,10 +334,10 @@ up or how responses are spoken.
       "options": {
         "sttPrompt": "~/.config/opencode/stt-prompt.md",
         "ttsAutoPrompt": "~/.config/opencode/tts-auto-prompt.md",
-        "ttsManualPrompt": "~/.config/opencode/tts-manual-prompt.md"
-      }
-    }
-  ]
+        "ttsManualPrompt": "~/.config/opencode/tts-manual-prompt.md",
+      },
+    },
+  ],
 }
 ```
 
@@ -437,12 +438,13 @@ npm run fmt:fix      # oxfmt --write
 
 ### Test local plugin in OpenCode
 
-To test unpublished changes in the OpenCode TUI, point `opencode.jsonc` at the
-local repo path, not the npm package name:
+To test unpublished changes in the OpenCode TUI, run `npm run build` first so
+`dist/` exists (the package exports `./dist/index.js`), then point
+`opencode.jsonc` at the local repo path, not the npm package name:
 
 ```jsonc
 {
-  "plugins": ["/Users/your-user/opencode-voice"]
+  "plugins": ["/Users/your-user/opencode-voice"],
 }
 ```
 

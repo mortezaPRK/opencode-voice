@@ -1,13 +1,15 @@
-// Shared session helpers for the OpenCode V2 CLI plugin.
+import type { Context } from "../types.js";
 
-/**
- * Get the currently focused session ID from the router. Returns null when the
- * view is not a session (e.g. home).
- */
-export function getActiveSessionID(ctx) {
+interface MessageLike {
+  id: string;
+  role?: string;
+  parts?: Array<{ type?: string; text?: string }>;
+}
+
+export function getActiveSessionID(ctx: Context): string | null {
   try {
-    const route = ctx.ui.router.current();
-    if (route && route.type === "session" && route.sessionID) return route.sessionID;
+    const route = ctx.ui.router.current() as { type?: string; sessionID?: string } | undefined;
+    if (route?.type === "session" && route.sessionID) return route.sessionID;
   } catch {
     // Router not available yet or not mounted.
   }
@@ -17,7 +19,7 @@ export function getActiveSessionID(ctx) {
 /**
  * Get the title of a specific session by ID. Returns "" if unknown or on error.
  */
-export async function getSessionTitle(ctx, sessionID) {
+export async function getSessionTitle(ctx: Context, sessionID: string | null): Promise<string> {
   if (!sessionID) return "";
   try {
     let session = ctx.data.session.get(sessionID);
@@ -35,25 +37,29 @@ export async function getSessionTitle(ctx, sessionID) {
  * Get the title of the currently focused session. Returns "" on error or when
  * there is no active session route.
  */
-export function getActiveSessionTitle(ctx) {
+export async function getActiveSessionTitle(ctx: Context): Promise<string> {
   const id = getActiveSessionID(ctx);
   if (!id) return "";
   return getSessionTitle(ctx, id);
 }
 
 /**
- * Resolve the trailing assistant turn's text for a session. Returns
- * { lastMessageID, text } or null.
+ * Resolve the trailing assistant turn's text for a session.
  */
-export async function getTurnAssistantText(ctx, sessionID) {
+export async function getTurnAssistantText(
+  ctx: Context,
+  sessionID: string | null,
+): Promise<{ lastMessageID: string; text: string } | null> {
   if (!sessionID) return null;
 
   try {
     await ctx.data.session.message.sync(sessionID).catch(() => {});
-    const messages = ctx.data.session.message.list(sessionID);
+    const messages = ctx.data.session.message.list(sessionID) as unknown as
+      | MessageLike[]
+      | undefined;
     if (!messages || messages.length === 0) return null;
 
-    const assistantIDs = [];
+    const assistantIDs: string[] = [];
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === "user") break;
       if (messages[i].role === "assistant") {
@@ -62,12 +68,12 @@ export async function getTurnAssistantText(ctx, sessionID) {
     }
     if (assistantIDs.length === 0) return null;
 
-    const allText = [];
+    const allText: string[] = [];
     for (const msgID of assistantIDs) {
-      let msg;
+      let msg: MessageLike | undefined;
       try {
         await ctx.data.session.message.sync(sessionID).catch(() => {});
-        msg = ctx.data.session.message.get(sessionID, msgID);
+        msg = ctx.data.session.message.get(sessionID, msgID) as unknown as MessageLike | undefined;
       } catch {
         continue;
       }

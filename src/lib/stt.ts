@@ -1,24 +1,29 @@
 // Speech-to-text: sox recording, whisper-cpp or API transcription, LLM normalization.
-//
-// This file is the V2 port. The pure audio / whisper / STT-API logic is
-// unchanged from the V1 plugin; only the OpenCode API wiring changed:
-//   - api.kv                       -> ctx.storage store (voice/setVoice)
-//   - api.ui.toast                 -> ctx.ui.toast.show
-//   - api.ui.dialog.replace(DialogSelect) -> await ctx.ui.dialog.select
-//   - client.tui.appendPrompt/submitPrompt -> ctx.client.session.prompt
-//   - getActiveSessionTitle(client) -> getActiveSessionTitle(ctx)
 
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { spawn, execSync } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { getActiveSessionID, getActiveSessionTitle } from "./session.js";
+import type {
+  CommandModule,
+  Complete,
+  Context,
+  KeymapCommand,
+  Logger,
+  PluginOptions,
+  Prompts,
+  Toast,
+  ToastVariant,
+  VoiceState,
+  VoiceStore,
+} from "../types.js";
 
 const DEFAULT_MODEL = "large-v3-turbo-q5_0";
 
-let sttApiEndpoint = null;
-let sttApiModel = null;
-let sttApiKeyEnv = null;
+let sttApiEndpoint: string | null = null;
+let sttApiModel: string | null = null;
+let sttApiKeyEnv: string | null = null;
 
 const WAV_FILENAME = "opencode-stt.wav";
 let tmpDir = "/tmp";
@@ -29,7 +34,12 @@ const MODELS_DIRS = [
   "/usr/local/share/whisper-cpp/models",
 ];
 
-const MODELS = {
+interface WhisperModel {
+  label: string;
+  file: string;
+}
+
+const MODELS: Record<string, WhisperModel> = {
   "large-v3-turbo-q5_0": {
     label: "Large v3 Turbo Q5 (recommended)",
     file: "ggml-large-v3-turbo-q5_0.bin",
@@ -48,7 +58,7 @@ const MODELS = {
 const DEFAULT_LANGUAGE = "auto";
 // Curated subset for the /stt-language picker; options.sttLanguage accepts any
 // whisper.cpp language code.
-const LANGUAGES = {
+const LANGUAGES: Record<string, { label: string }> = {
   auto: { label: "Auto-detect" },
   en: { label: "English" },
   zh: { label: "Chinese" },
@@ -64,28 +74,45 @@ const LANGUAGES = {
 };
 let sttDefaultLanguage = DEFAULT_LANGUAGE;
 
-export function isOpenRouterEndpoint(endpoint) {
+type AudioBackend = "coreaudio" | "pulseaudio" | "default";
+
+interface InputDevice {
+  name: string;
+  label: string;
+}
+
+interface TranscriptionResult {
+  text?: string;
+  error?: string;
+}
+
+export function isOpenRouterEndpoint(endpoint: string | null | undefined): boolean {
   return /(^https?:\/\/)?([^/]+\.)?openrouter\.ai(\/|$)/i.test(endpoint || "");
 }
 
-function buildMultipartTranscriptionRequest(model, audioBuffer, apiKey) {
-  const blob = new Blob([audioBuffer], { type: "audio/wav" });
+function buildMultipartTranscriptionRequest(
+  model: string,
+  audioBuffer: Buffer,
+  apiKey: string | null,
+): { headers: Record<string, string>; body: FormData } {
+  const blob = new Blob([new Uint8Array(audioBuffer)], { type: "audio/wav" });
   const form = new FormData();
   form.append("file", blob, "audio.wav");
   form.append("model", model);
   form.append("response_format", "json");
 
-  const headers = {};
+  const headers: Record<string, string> = {};
   if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
 
-  return {
-    headers,
-    body: form,
-  };
+  return { headers, body: form };
 }
 
-export function buildOpenRouterTranscriptionRequest(model, audioBuffer, apiKey) {
-  const headers = { "Content-Type": "application/json" };
+export function buildOpenRouterTranscriptionRequest(
+  model: string,
+  audioBuffer: Buffer,
+  apiKey: string | null,
+): { headers: Record<string, string>; body: string } {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
 
   const payload = {
@@ -96,13 +123,10 @@ export function buildOpenRouterTranscriptionRequest(model, audioBuffer, apiKey) 
     },
   };
 
-  return {
-    headers,
-    body: JSON.stringify(payload),
-  };
+  return { headers, body: JSON.stringify(payload) };
 }
 
-function getModelsDir() {
+function getModelsDir(): string {
   for (const dir of MODELS_DIRS) {
     if (fs.existsSync(dir)) return dir;
   }
@@ -111,7 +135,7 @@ function getModelsDir() {
 
 // ---- Audio backend detection (coreaudio / pulseaudio / sox default) ----
 
-function detectAudioBackend() {
+function detectAudioBackend(): AudioBackend {
   if (process.platform === "darwin") return "coreaudio";
   try {
     execSync("pactl --version", { stdio: "ignore", timeout: 3000 });
@@ -123,12 +147,12 @@ function detectAudioBackend() {
 
 // ---- Audio server diagnostics ----
 
-export function isWSL() {
+export function isWSL(): boolean {
   return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP);
 }
 
 // Unlike `pactl --version`, `pactl info` actually connects to the server.
-function pulseServerHealth() {
+function pulseServerHealth(): { ok: boolean } {
   try {
     execSync("pactl info", { stdio: "ignore", timeout: 3000 });
     return { ok: true };
@@ -139,10 +163,15 @@ function pulseServerHealth() {
 
 // User-facing hint for missing devices / recording failures. On WSL the audio
 // server is WSLg's PulseAudio, which can wedge and needs a `wsl --shutdown`.
-export function buildAudioHint({ backend, serverOk, isWsl }) {
+export function buildAudioHint(input: {
+  backend: AudioBackend;
+  serverOk: boolean;
+  isWsl: boolean;
+}): string {
+  const { backend, serverOk, isWsl: wsl } = input;
   if (backend !== "pulseaudio") return "No input devices found";
   if (serverOk) return "No input devices found - check your audio input source configuration";
-  if (isWsl) {
+  if (wsl) {
     return 'Audio server unreachable. On WSL, WSLg\'s PulseAudio may be stuck - run "wsl --shutdown" on Windows, then reopen Ubuntu';
   }
   return "Audio server unreachable - check that PipeWire/PulseAudio is running";
@@ -150,24 +179,24 @@ export function buildAudioHint({ backend, serverOk, isWsl }) {
 
 // Appends a server-health hint to recording failure messages when the
 // PulseAudio server is unreachable (e.g. wedged WSLg on WSL).
-function audioFailureSuffix(backend) {
+function audioFailureSuffix(backend: AudioBackend): string {
   if (backend !== "pulseaudio") return "";
   if (pulseServerHealth().ok) return "";
   return `. ${buildAudioHint({ backend, serverOk: false, isWsl: isWSL() })}`;
 }
 
 // Input device descriptors: name is the value passed to sox, label is shown in the UI.
-export function parsePactlSources(jsonText) {
-  const data = JSON.parse(jsonText);
+export function parsePactlSources(jsonText: string): InputDevice[] {
+  const data = JSON.parse(jsonText) as Array<{ name?: string; description?: string }>;
   return (Array.isArray(data) ? data : [])
     .filter((s) => s?.name && !s.name.endsWith(".monitor"))
     .map((s) => ({
-      name: s.name,
-      label: s.description ? `${s.description} (${s.name})` : s.name,
+      name: s.name as string,
+      label: s.description ? `${s.description} (${s.name})` : (s.name as string),
     }));
 }
 
-export function parsePactlSourcesShort(text) {
+export function parsePactlSourcesShort(text: string): InputDevice[] {
   return text
     .split("\n")
     .map((line) => line.trim().split(/\s+/)[1])
@@ -175,18 +204,20 @@ export function parsePactlSourcesShort(text) {
     .map((name) => ({ name, label: name }));
 }
 
-function listInputDevices(backend) {
+function listInputDevices(backend: AudioBackend): InputDevice[] {
   if (backend === "coreaudio") {
     try {
       const json = execSync("system_profiler SPAudioDataType -json 2>/dev/null", {
         encoding: "utf-8",
         timeout: 5000,
       });
-      const data = JSON.parse(json);
+      const data = JSON.parse(json) as {
+        SPAudioDataType?: Array<{ _items?: Array<Record<string, unknown>> }>;
+      };
       return (data.SPAudioDataType?.[0]?._items || [])
         .filter((d) => d.coreaudio_input_source != null)
         .map((d) => {
-          const name = d.coreaudio_device_name || d._name;
+          const name = (d.coreaudio_device_name || d._name) as string;
           return { name, label: name };
         });
     } catch {
@@ -215,7 +246,7 @@ function listInputDevices(backend) {
   return [];
 }
 
-export function buildRecordArgs(backend, mic) {
+export function buildRecordArgs(backend: AudioBackend, mic: string | null): string[] {
   if (backend === "pulseaudio") return ["-t", "pulseaudio", mic || "default"];
   if (backend === "coreaudio" && mic) return ["-t", "coreaudio", mic];
   return ["-d"];
@@ -223,15 +254,15 @@ export function buildRecordArgs(backend, mic) {
 
 // ---- Recording state and control ----
 
-let soxProc = null;
+let soxProc: ChildProcess | null = null;
 let soxStderr = "";
 let recording = false;
 let processing = false;
 
-function forceKillSox(logger) {
+function forceKillSox(logger?: Logger): void {
   if (soxProc) {
     try {
-      process.kill(soxProc.pid, "SIGKILL");
+      process.kill(soxProc.pid as number, "SIGKILL");
       logger?.log("STT", `Killed sox pid=${soxProc.pid}`, "debug");
     } catch {}
     soxProc = null;
@@ -241,9 +272,15 @@ function forceKillSox(logger) {
   } catch {}
 }
 
-function startRecording(voice, backend, toast, logger, trimSilence = true) {
+function startRecording(
+  voice: VoiceState,
+  backend: AudioBackend,
+  toast: Toast,
+  logger: Logger,
+  trimSilence = true,
+): void {
   if (soxProc) {
-    logger?.log("STT", "Start recording skipped: sox already running", "debug");
+    logger.log("STT", "Start recording skipped: sox already running", "debug");
     return;
   }
 
@@ -256,14 +293,14 @@ function startRecording(voice, backend, toast, logger, trimSilence = true) {
   soxStderr = "";
   const mic = voice.mic || null;
   const inputArgs = buildRecordArgs(backend, mic);
-  logger?.log(
+  logger.log(
     "STT",
     `Starting recording backend=${backend} mic=${mic || "system default"}`,
     "debug",
   );
 
   const silenceArgs = trimSilence ? ["silence", "1", "0.1", "1%"] : [];
-  soxProc = spawn(
+  const proc = spawn(
     "sox",
     [...inputArgs, "-r", "16000", "-c", "1", "-b", "16", wavFile, ...silenceArgs],
     {
@@ -271,23 +308,24 @@ function startRecording(voice, backend, toast, logger, trimSilence = true) {
       detached: false,
     },
   );
+  soxProc = proc;
 
-  soxProc.stderr.on("data", (chunk) => {
+  proc.stderr?.on("data", (chunk: Buffer) => {
     soxStderr += chunk.toString();
   });
 
-  soxProc.on("error", (err) => {
+  proc.on("error", (err: Error) => {
     soxProc = null;
-    logger?.log("STT", `Recording failed: ${err.message}`, "error");
+    logger.log("STT", `Recording failed: ${err.message}`, "error");
     if (recording) {
       recording = false;
       toast(`Recording failed: ${err.message}${audioFailureSuffix(backend)}`, "error");
     }
   });
 
-  soxProc.on("exit", (code) => {
+  proc.on("exit", (code: number | null) => {
     soxProc = null;
-    logger?.log(
+    logger.log(
       "STT",
       `sox exited code=${code} stderr=${soxStderr.trim()}`,
       code === 0 || code === null ? "debug" : "warn",
@@ -305,56 +343,60 @@ function startRecording(voice, backend, toast, logger, trimSilence = true) {
   recording = true;
 }
 
-function stopRecording(logger) {
-  logger?.log("STT", "Stopping recording", "debug");
+function stopRecording(logger: Logger): void {
+  logger.log("STT", "Stopping recording", "debug");
   if (soxProc) soxProc.kill("SIGINT");
 }
 
-async function waitForSoxExit(logger, timeoutMs = 2000) {
+async function waitForSoxExit(logger: Logger, timeoutMs = 2000): Promise<void> {
   const start = Date.now();
   while (soxProc && Date.now() - start < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((resolve) => setTimeout(resolve, 100));
   }
   if (soxProc) {
-    logger?.log("STT", "sox did not stop before timeout", "warn");
+    logger.log("STT", "sox did not stop before timeout", "warn");
     forceKillSox(logger);
   }
 }
 
-function getModelName(voice) {
+function getModelName(voice: VoiceState): string {
   const model = voice.model || DEFAULT_MODEL;
   return MODELS[model] ? model : DEFAULT_MODEL;
 }
 
-function getModelPath(voice) {
+function getModelPath(voice: VoiceState): string {
   return path.join(getModelsDir(), MODELS[getModelName(voice)].file);
 }
 
-function getLanguage(voice) {
+function getLanguage(voice: VoiceState): string {
   return voice.language || sttDefaultLanguage;
 }
 
-export function buildWhisperArgs(modelPath, wavFile, language) {
+export function buildWhisperArgs(
+  modelPath: string,
+  wavFile: string,
+  language: string | null,
+): string[] {
   return ["-m", modelPath, "-f", wavFile, "-l", language || DEFAULT_LANGUAGE, "-np", "-nt"];
 }
 
-function transcribe(voice, logger) {
+function transcribe(voice: VoiceState, logger: Logger): Promise<TranscriptionResult> {
   const wavFile = path.join(tmpDir, WAV_FILENAME);
   const mp = getModelPath(voice);
   const lang = getLanguage(voice);
-  logger?.log("STT", `Local transcription requested model=${mp} language=${lang}`, "debug");
+  logger.log("STT", `Local transcription requested model=${mp} language=${lang}`, "debug");
   if (!fs.existsSync(mp)) {
-    logger?.log("STT", `Whisper model missing: ${mp}`, "error");
+    logger.log("STT", `Whisper model missing: ${mp}`, "error");
     return Promise.resolve({
       error: `Model not found: ${getModelName(voice)}. Download from huggingface.co/ggerganov/whisper.cpp`,
     });
   }
   if (!fs.existsSync(wavFile)) {
-    logger?.log("STT", `Recording file missing: ${wavFile}`, "error");
+    logger.log("STT", `Recording file missing: ${wavFile}`, "error");
     return Promise.resolve({ error: "No recording file - sox may have failed to capture audio" });
   }
   if (fs.statSync(wavFile).size <= 44) {
-    logger?.log("STT", `Recording file empty: ${wavFile}`, "warn");
+    logger.log("STT", `Recording file empty: ${wavFile}`, "warn");
     return Promise.resolve({ error: "Recording is empty - no audio captured" });
   }
 
@@ -364,43 +406,43 @@ function transcribe(voice, logger) {
     const proc = spawn("whisper-cli", buildWhisperArgs(mp, wavFile, lang), {
       stdio: ["ignore", "pipe", "pipe"],
     });
-    logger?.log("STT", `Started whisper-cli pid=${proc.pid}`, "debug");
+    logger.log("STT", `Started whisper-cli pid=${proc.pid}`, "debug");
 
-    proc.stdout.on("data", (chunk) => {
+    proc.stdout?.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
     });
-    proc.stderr.on("data", (chunk) => {
+    proc.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
     });
 
     const timer = setTimeout(() => {
       proc.kill("SIGKILL");
-      logger?.log("STT", "whisper-cli timed out after 60s", "error");
+      logger.log("STT", "whisper-cli timed out after 60s", "error");
       resolve({ error: "Transcription timed out (60s)" });
     }, 60000);
 
-    proc.on("error", (err) => {
+    proc.on("error", (err: Error) => {
       clearTimeout(timer);
-      logger?.log("STT", `whisper-cli error: ${err.message}`, "error");
+      logger.log("STT", `whisper-cli error: ${err.message}`, "error");
       resolve({ error: `Transcription failed: ${err.message}` });
     });
 
-    proc.on("exit", (code) => {
+    proc.on("exit", (code: number | null) => {
       clearTimeout(timer);
       // whisper-cli exits 0 even for an unknown language, printing the error to
       // stderr instead; surface it rather than reporting "no speech detected".
       const langError = stderr.match(/error: unknown language '([^']+)'/);
       if (langError) {
-        logger?.log("STT", `whisper-cli rejected language: ${langError[1]}`, "error");
+        logger.log("STT", `whisper-cli rejected language: ${langError[1]}`, "error");
         resolve({ error: `Unknown whisper language: ${langError[1]}` });
         return;
       }
       if (code !== 0) {
-        logger?.log("STT", `whisper-cli exited code=${code} stderr=${stderr.trim()}`, "error");
+        logger.log("STT", `whisper-cli exited code=${code} stderr=${stderr.trim()}`, "error");
         resolve({ error: stderr.trim().split("\n").pop() || `whisper-cli exited (code=${code})` });
         return;
       }
-      logger?.log("STT", `Local transcription succeeded stdoutChars=${stdout.length}`, "debug");
+      logger.log("STT", `Local transcription succeeded stdoutChars=${stdout.length}`, "debug");
       resolve({
         text: stdout
           .replace(/\[.*?\]/g, "")
@@ -444,11 +486,17 @@ CRITICAL DOMAIN CORRECTIONS - Fix common STT homophone errors in software engine
 
 Rely heavily on context to fix words that sound similar to programming terminology.`;
 
-async function normalizeTranscription(complete, rawText, sessionTitle, systemPrompt, logger) {
+async function normalizeTranscription(
+  complete: Complete,
+  rawText: string,
+  sessionTitle: string,
+  systemPrompt: string,
+  logger: Logger,
+): Promise<{ text: string | null; error?: string }> {
   const contextLine = sessionTitle ? ` The user is currently working on: "${sessionTitle}"` : "";
   const system = `${systemPrompt}${contextLine}`;
 
-  logger?.log("STT", `Normalizing transcription chars=${rawText.length}`, "debug");
+  logger.log("STT", `Normalizing transcription chars=${rawText.length}`, "debug");
   const result = await complete({
     system,
     prompt: `Clean up this speech-to-text transcription:\n\n${rawText}`,
@@ -456,50 +504,50 @@ async function normalizeTranscription(complete, rawText, sessionTitle, systemPro
   return result;
 }
 
-async function getApiModels(logger) {
+async function getApiModels(logger: Logger): Promise<Array<{ title: string; value: string }>> {
   if (!sttApiEndpoint) return [];
   try {
     const url = sttApiEndpoint.endsWith("/")
       ? `${sttApiEndpoint}models`
       : `${sttApiEndpoint}/models`;
-    const headers = {};
+    const headers: Record<string, string> = {};
     if (sttApiKeyEnv && process.env[sttApiKeyEnv]) {
       headers["Authorization"] = "Bearer " + process.env[sttApiKeyEnv];
     }
     const resp = await fetch(url, { headers, signal: AbortSignal.timeout(5000) });
-    logger?.log("STT", `Fetched STT API models status=${resp.status}`, resp.ok ? "debug" : "warn");
+    logger.log("STT", `Fetched STT API models status=${resp.status}`, resp.ok ? "debug" : "warn");
     if (!resp.ok) return [];
-    const data = await resp.json();
+    const data = (await resp.json()) as { data?: Array<{ id?: string }> };
     return (data.data || [])
       .filter((m) => m.id && /whisper/i.test(m.id))
-      .map((m) => ({ value: m.id, label: m.id }));
+      .map((m) => ({ title: m.id as string, value: m.id as string }));
   } catch (err) {
-    logger?.log("STT", `Failed to fetch STT API models: ${err.message}`, "error");
+    logger.log("STT", `Failed to fetch STT API models: ${(err as Error).message}`, "error");
     return [];
   }
 }
 
-async function transcribeApi(voice, logger) {
+async function transcribeApi(voice: VoiceState, logger: Logger): Promise<TranscriptionResult> {
   if (!sttApiEndpoint || !sttApiModel) {
-    logger?.log("STT", "STT API transcription skipped: API not configured", "warn");
+    logger.log("STT", "STT API transcription skipped: API not configured", "warn");
     return { error: "STT API not configured" };
   }
   const wavFile = path.join(tmpDir, WAV_FILENAME);
   const model = voice.apiModel || sttApiModel;
-  logger?.log("STT", `STT API transcription requested model=${model}`, "debug");
+  logger.log("STT", `STT API transcription requested model=${model}`, "debug");
 
   if (!fs.existsSync(wavFile)) {
-    logger?.log("STT", `Recording file missing: ${wavFile}`, "error");
+    logger.log("STT", `Recording file missing: ${wavFile}`, "error");
     return { error: "No recording file - sox may have failed to capture audio" };
   }
   if (fs.statSync(wavFile).size <= 44) {
-    logger?.log("STT", `Recording file empty: ${wavFile}`, "warn");
+    logger.log("STT", `Recording file empty: ${wavFile}`, "warn");
     return { error: "Recording is empty - no audio captured" };
   }
 
   try {
     const audioBuffer = await fs.promises.readFile(wavFile);
-    const apiKey = sttApiKeyEnv ? process.env[sttApiKeyEnv] : null;
+    const apiKey = sttApiKeyEnv ? (process.env[sttApiKeyEnv] ?? null) : null;
     const useOpenRouterFormat = isOpenRouterEndpoint(sttApiEndpoint);
 
     const url = sttApiEndpoint.endsWith("/")
@@ -516,40 +564,46 @@ async function transcribeApi(voice, logger) {
       body: request.body,
       signal: AbortSignal.timeout(60000),
     });
-    logger?.log("STT", `STT API response status=${resp.status}`, resp.ok ? "debug" : "error");
+    logger.log("STT", `STT API response status=${resp.status}`, resp.ok ? "debug" : "error");
 
     if (!resp.ok) {
       const responseBody = await resp.text();
       let msg = `STT API error ${resp.status}`;
       try {
-        const err = JSON.parse(responseBody);
+        const err = JSON.parse(responseBody) as { error?: { message?: string } };
         msg = err?.error?.message || msg;
       } catch {}
       return { error: msg };
     }
 
-    let data;
+    let data: { text?: string };
     try {
-      data = await resp.json();
+      data = (await resp.json()) as { text?: string };
     } catch (err) {
-      logger?.log("STT", `STT API returned invalid JSON: ${err.message}`, "error");
-      return { error: `STT API returned invalid JSON: ${err.message}` };
+      logger.log("STT", `STT API returned invalid JSON: ${(err as Error).message}`, "error");
+      return { error: `STT API returned invalid JSON: ${(err as Error).message}` };
     }
-    logger?.log("STT", `STT API transcription succeeded chars=${data.text?.length || 0}`, "debug");
+    logger.log("STT", `STT API transcription succeeded chars=${data.text?.length || 0}`, "debug");
     return { text: data.text?.trim() || "" };
   } catch (err) {
-    logger?.log("STT", `STT API request failed: ${err.message}`, "error");
-    if (err.name === "TimeoutError" || err.name === "AbortError") {
+    const e = err as Error;
+    logger.log("STT", `STT API request failed: ${e.message}`, "error");
+    if (e.name === "TimeoutError" || e.name === "AbortError") {
       return { error: "STT API request timed out (60s)" };
     }
-    return { error: `STT API request failed: ${err.message}` };
+    return { error: `STT API request failed: ${e.message}` };
   }
 }
 
 // V2 has no composer-set API exposing staged prompt edits, so transcribed text
 // is submitted directly to the focused session. For the review (non-submit)
 // path we confirm first so the user can cancel before sending.
-async function sendTranscription(ctx, text, submit, toast) {
+async function sendTranscription(
+  ctx: Context,
+  text: string,
+  submit: boolean,
+  toast: Toast,
+): Promise<boolean> {
   const sessionID = getActiveSessionID(ctx);
   if (!sessionID) {
     throw new Error("No active session to submit to");
@@ -572,17 +626,17 @@ async function sendTranscription(ctx, text, submit, toast) {
 }
 
 async function doTranscribePipeline(
-  ctx,
-  voice,
-  complete,
-  toast,
-  systemPrompt,
-  submit = false,
-  logger,
-) {
+  ctx: Context,
+  voice: VoiceState,
+  complete: Complete,
+  toast: Toast,
+  systemPrompt: string,
+  submit: boolean,
+  logger: Logger,
+): Promise<void> {
   processing = true;
   try {
-    logger?.log("STT", `Pipeline started submit=${submit}`, "debug");
+    logger.log("STT", `Pipeline started submit=${submit}`, "debug");
     stopRecording(logger);
     await waitForSoxExit(logger);
 
@@ -592,12 +646,12 @@ async function doTranscribePipeline(
       : await transcribe(voice, logger);
 
     if (result.error) {
-      logger?.log("STT", `Transcription failed: ${result.error}`, "error");
+      logger.log("STT", `Transcription failed: ${result.error}`, "error");
       toast(result.error, "error");
       return;
     }
     if (!result.text) {
-      logger?.log("STT", "Transcription produced no text", "warn");
+      logger.log("STT", "Transcription produced no text", "warn");
       toast("No speech detected", "warning");
       return;
     }
@@ -613,18 +667,18 @@ async function doTranscribePipeline(
     );
 
     if (!llmResult.text) {
-      logger?.log("STT", `Normalization failed, using raw input: ${llmResult.error}`, "warn");
+      logger.log("STT", `Normalization failed, using raw input: ${llmResult.error}`, "warn");
       toast(`Normalization failed, using raw input: ${llmResult.error}`, "warning");
       await sendTranscription(ctx, result.text, submit, toast);
       return;
     }
 
     await sendTranscription(ctx, llmResult.text, submit, toast);
-    logger?.log("STT", `Pipeline completed normalizedChars=${llmResult.text.length}`, "debug");
+    logger.log("STT", `Pipeline completed normalizedChars=${llmResult.text.length}`, "debug");
     toast(submit ? "Transcription submitted" : "Transcription added to prompt", "success");
   } catch (err) {
-    logger?.log("STT", `Pipeline error: ${err.message}`, "error");
-    toast(`STT error: ${err.message}`, "error");
+    logger.log("STT", `Pipeline error: ${(err as Error).message}`, "error");
+    toast(`STT error: ${(err as Error).message}`, "error");
   } finally {
     processing = false;
     recording = false;
@@ -633,12 +687,19 @@ async function doTranscribePipeline(
 
 // ---- Public API for V2 CLI plugin ----
 
-export function registerSTT(ctx, complete, prompts, opts, store, logger) {
+export function registerSTT(
+  ctx: Context,
+  complete: Complete,
+  prompts: Prompts,
+  opts: PluginOptions,
+  store: VoiceStore,
+  logger: Logger,
+): CommandModule {
   const { voice, setVoice } = store;
   const systemPrompt = prompts?.stt || STT_SYSTEM_PROMPT;
   const backend = detectAudioBackend();
-  logger?.log("STT", `Audio backend=${backend}`, "debug");
-  function toast(message, variant = "info") {
+  logger.log("STT", `Audio backend=${backend}`, "debug");
+  function toast(message: string, variant: ToastVariant = "info"): void {
     ctx.ui.toast.show({ message, variant, duration: 3000 });
   }
 
@@ -646,7 +707,7 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
     sttApiEndpoint = opts.sttEndpoint;
     sttApiModel = opts.sttModel || "whisper-large-v3-turbo";
     sttApiKeyEnv = opts.sttApiKeyEnv || null;
-    logger?.log(
+    logger.log(
       "STT",
       `Configured STT API endpoint=${sttApiEndpoint} model=${sttApiModel}`,
       "debug",
@@ -656,17 +717,17 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
   if (opts?.sttLanguage) {
     sttDefaultLanguage = opts.sttLanguage;
   }
-  logger?.log("STT", `Default language=${sttDefaultLanguage}`, "debug");
+  logger.log("STT", `Default language=${sttDefaultLanguage}`, "debug");
 
   tmpDir = opts?.tmpDir || "/tmp";
   try {
     fs.mkdirSync(tmpDir, { recursive: true });
   } catch (err) {
-    logger?.log("STT", `Failed to create tmpDir ${tmpDir}: ${err.message}`, "warn");
+    logger.log("STT", `Failed to create tmpDir ${tmpDir}: ${(err as Error).message}`, "warn");
   }
-  logger?.log("STT", `STT temp dir=${tmpDir}`, "debug");
+  logger.log("STT", `STT temp dir=${tmpDir}`, "debug");
 
-  const commands = [
+  const commands: KeymapCommand[] = [
     {
       id: "stt.record",
       title: sttApiEndpoint ? "STT: record/transcribe (API)" : "STT: record/transcribe",
@@ -684,9 +745,9 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
         }
         if (recording) {
           toast("Stopping, transcribing...");
-          doTranscribePipeline(ctx, voice, complete, toast, systemPrompt, false, logger);
+          void doTranscribePipeline(ctx, voice, complete, toast, systemPrompt, false, logger);
         } else {
-          startRecording(voice, backend, toast, logger, opts?.trimSilence);
+          startRecording(voice, backend, toast, logger, opts?.trimSilence ?? true);
           if (recording) toast("Recording... press again to transcribe");
         }
       },
@@ -711,7 +772,7 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
           return;
         }
         toast("Stopping, transcribing...");
-        doTranscribePipeline(ctx, voice, complete, toast, systemPrompt, true, logger);
+        void doTranscribePipeline(ctx, voice, complete, toast, systemPrompt, true, logger);
       },
     },
     {
@@ -725,7 +786,7 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
         if (recording) {
           recording = false;
           forceKillSox(logger);
-          logger?.log("STT", "Recording cancelled", "debug");
+          logger.log("STT", "Recording cancelled", "debug");
           toast("Recording cancelled");
         }
       },
@@ -739,7 +800,7 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
       slash: { name: "stt-model" },
       async run() {
         if (sttApiEndpoint) {
-          const current = voice.apiModel || sttApiModel;
+          const current = voice.apiModel || sttApiModel || "";
           const apiModels = await getApiModels(logger);
           const options = apiModels.length > 0 ? apiModels : [{ title: current, value: current }];
           const selected = await ctx.ui.dialog.select({
@@ -748,8 +809,8 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
             options,
           });
           if (selected === undefined) return;
-          setVoice((d) => {
-            d.apiModel = selected;
+          setVoice((draft) => {
+            draft.apiModel = selected;
           });
           toast(`Whisper API model: ${selected}`);
         } else {
@@ -757,14 +818,14 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
           const selected = await ctx.ui.dialog.select({
             title: "Select whisper model",
             current,
-            options: Object.entries(MODELS).map(([key, v]) => ({
-              title: v.label,
+            options: Object.entries(MODELS).map(([key, value]) => ({
+              title: value.label,
               value: key,
             })),
           });
           if (selected === undefined) return;
-          setVoice((d) => {
-            d.model = selected;
+          setVoice((draft) => {
+            draft.model = selected;
           });
           toast(`Whisper model: ${MODELS[selected].label}`);
         }
@@ -782,14 +843,14 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
         const selected = await ctx.ui.dialog.select({
           title: "Select transcription language",
           current,
-          options: Object.entries(LANGUAGES).map(([key, v]) => ({
-            title: v.label,
+          options: Object.entries(LANGUAGES).map(([key, value]) => ({
+            title: value.label,
             value: key,
           })),
         });
         if (selected === undefined) return;
-        setVoice((d) => {
-          d.language = selected;
+        setVoice((draft) => {
+          draft.language = selected;
         });
         toast(`Whisper language: ${LANGUAGES[selected].label}`);
       },
@@ -806,7 +867,7 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
         if (devices.length === 0) {
           const serverOk = backend !== "pulseaudio" || pulseServerHealth().ok;
           const hint = buildAudioHint({ backend, serverOk, isWsl: isWSL() });
-          logger?.log("STT", `No input devices: ${hint}`, "warn");
+          logger.log("STT", `No input devices: ${hint}`, "warn");
           toast(hint);
           return;
         }
@@ -819,20 +880,20 @@ export function registerSTT(ctx, complete, prompts, opts, store, logger) {
           ],
         });
         if (selected === undefined) return;
-        setVoice((d) => {
-          d.mic = selected;
+        setVoice((draft) => {
+          draft.mic = selected;
         });
         if (selected === "") {
           toast("Mic: system default");
         } else {
-          const dev = devices.find((d) => d.name === selected);
-          toast(`Mic: ${dev?.label || selected}`);
+          const device = devices.find((d) => d.name === selected);
+          toast(`Mic: ${device?.label || selected}`);
         }
       },
     },
   ];
 
-  function cleanup() {
+  function cleanup(): void {
     forceKillSox(logger);
   }
 
