@@ -14,14 +14,11 @@ code-heavy responses, etc.).
 
 ## Install
 
-This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
-`opencode.jsonc` under `plugins`. By default the plugin reuses the model and
+This is a **V2 CLI plugin** for OpenCode. Add it to the global CLI config
+`~/.config/opencode/cli.json` (`$XDG_CONFIG_HOME/opencode/cli.json` when set).
+CLI plugin options are read from this file; options under `opencode.json(c)` are
+not passed to CLI plugin entries. By default the plugin reuses the model and
 credentials already configured in OpenCode:
-
-> [!TIP]
-> The plugin is CLI-only (voices STT/TTS). To keep it active even against remote
-> servers, also add the package under `plugins` in the global CLI config
-> (`~/.config/opencode/cli.json`). See [CLI plugins](https://opencode.ai/v2/docs/build/plugins/cli).
 
 ```jsonc
 {
@@ -38,6 +35,9 @@ credentials already configured in OpenCode:
   ],
 }
 ```
+
+See [CLI plugins](https://opencode.ai/v2/docs/build/plugins/cli) for other ways
+to load CLI plugins.
 
 Omit `llm.model` to use OpenCode's default model. An OpenAI-compatible
 endpoint can be configured instead; see [LLM backend](#llm-backend).
@@ -492,18 +492,35 @@ npm run fmt:fix      # oxfmt --write
 
 ### Test local plugin in OpenCode
 
-To test unpublished changes in the OpenCode TUI, run `npm run build` first so
-`dist/` exists (the package exports `./dist/index.js`), then point
-`opencode.jsonc` at the local repo path, not the npm package name:
+Run `npm run build` first so `dist/index.js` and `dist/tui.js` exist. OpenCode
+resolves a local plugin directory through root `index.*` and `tui.*` entries,
+not through the package `exports` map, so use a small wrapper:
+
+```js
+// wrapper/index.js
+export { default } from "/absolute/path/opencode-voice/dist/index.js";
+// wrapper/tui.js
+export { default } from "/absolute/path/opencode-voice/dist/tui.js";
+```
+
+Add the wrapper to `~/.config/opencode/cli.json`. CLI plugin options are read
+from that file, not from `opencode.json(c)`:
 
 ```jsonc
 {
-  "plugins": ["/Users/your-user/opencode-voice"],
+  "plugins": [
+    {
+      "package": "/absolute/path/opencode-voice-wrapper",
+      "options": {
+        "llm": { "type": "opencode" },
+      },
+    },
+  ],
 }
 ```
 
-V2 discovers local plugins in `.opencode/plugins/` too — symlink or copy the
-package there if you prefer that instead of a `plugins` entry.
+V2 also discovers local plugins in `.opencode/plugins/`; those use the same
+`index.*` + `tui.*` layout.
 
 ### Optional macOS Hammerspoon integration
 
