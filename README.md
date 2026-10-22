@@ -1,7 +1,7 @@
-[![CI](https://github.com/renjfk/opencode-voice/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/renjfk/opencode-voice/actions/workflows/ci.yml)
+[![CI](https://github.com/mortezaPRK/opencode-voice/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/mortezaPRK/opencode-voice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![npm](https://img.shields.io/npm/v/@renjfk/opencode-voice)](https://www.npmjs.com/package/@renjfk/opencode-voice)
-[![Downloads](https://img.shields.io/npm/dm/@renjfk/opencode-voice)](https://www.npmjs.com/package/@renjfk/opencode-voice)
+[![npm](https://img.shields.io/npm/v/@mortz.prk/opencode-voice)](https://www.npmjs.com/package/@mortz.prk/opencode-voice)
+[![Downloads](https://img.shields.io/npm/dm/@mortz.prk/opencode-voice)](https://www.npmjs.com/package/@mortz.prk/opencode-voice)
 
 # opencode-voice
 
@@ -14,34 +14,39 @@ code-heavy responses, etc.).
 
 ## Install
 
-Add to your `tui.json` (create at `~/.config/opencode/tui.json` if it doesn't
-exist). You must configure at least `endpoint` and `model`:
+This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
+`opencode.jsonc` under `plugins`. You must configure at least `endpoint` and
+`model`:
 
-> [!NOTE]
-> **Clobbering default keybinds.** This plugin uses `ctrl+r` for voice
-> recording, but OpenCode assigns it to session rename by default. Session
-> rename is not used frequently and is still accessible via `/rename`, so we
-> clobber the factory default to let the plugin use `ctrl+r` properly. See
-> the `keybinds` section in the config below.
+> [!TIP]
+> The plugin is CLI-only (voices STT/TTS). To keep it active even against remote
+> servers, also add the package under `plugins` in the global CLI config
+> (`~/.config/opencode/cli.json`). See [CLI plugins](https://opencode.ai/v2/docs/build/plugins/cli).
 
-```json
+```jsonc
 {
-  "$schema": "https://opencode.ai/tui.json",
-  "keybinds": {
-    "session_rename": "none"
-  },
-  "plugin": [
-    [
-      "@renjfk/opencode-voice",
-      {
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
         "endpoint": "https://api.anthropic.com/v1",
         "model": "claude-haiku-4-5",
         "apiKeyEnv": "ANTHROPIC_API_KEY"
       }
-    ]
+    }
   ]
 }
 ```
+
+> [!NOTE]
+> **Keybind conflict.** This plugin uses `ctrl+r` for voice recording, which
+> OpenCode assigns to session rename by default. To let the plugin keep
+> `ctrl+r`, disable the conflicting binding in `cli.json`:
+> ```json
+> {
+>   "keybinds": { "session.rename": "none" }
+> }
+> ```
 
 ### Refresh cached plugin after updates
 
@@ -49,7 +54,7 @@ If OpenCode keeps using an older published version of the plugin after an
 update, clear the cached package and restart OpenCode:
 
 ```bash
-rm -rf ~/.cache/opencode/packages/@renjfk/
+rm -rf ~/.cache/opencode/packages/
 ```
 
 ## Prerequisites
@@ -233,37 +238,38 @@ speech-to-text it cleans up whisper output (punctuation, filler words, software
 engineering homophones). For text-to-speech it converts markdown into natural
 spoken text.
 
-Configure your endpoint in `tui.json` via plugin options. Any OpenAI-compatible
-endpoint works (Anthropic, OpenAI, Ollama, vLLM, LM Studio, etc.). The `apiKeyEnv`
-option is optional - omit it for unauthenticated endpoints like Ollama.
+Configure your endpoint in `opencode.jsonc` via plugin options. Any
+OpenAI-compatible endpoint works (Anthropic, OpenAI, Ollama, vLLM, LM Studio,
+etc.). The `apiKeyEnv` option is optional - omit it for unauthenticated
+endpoints like Ollama.
 
-```json
+```jsonc
 {
-  "plugin": [
-    [
-      "@renjfk/opencode-voice",
-      {
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
         "endpoint": "https://api.anthropic.com/v1",
         "model": "claude-haiku-4-5",
         "apiKeyEnv": "ANTHROPIC_API_KEY"
       }
-    ]
+    }
   ]
 }
 ```
 
 For unauthenticated local endpoints (e.g. Ollama):
 
-```json
+```jsonc
 {
-  "plugin": [
-    [
-      "@renjfk/opencode-voice",
-      {
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
         "endpoint": "http://localhost:11434/v1",
         "model": "llama3.2"
       }
-    ]
+    }
   ]
 }
 ```
@@ -292,17 +298,17 @@ Instead of local `whisper-cli`, you can use an OpenAI-compatible speech-to-text
 API (e.g. serving a Whisper model). This is useful when you want to run the
 plugin on a machine without whisper-cpp installed.
 
-```json
+```jsonc
 {
-  "plugin": [
-    [
-      "@renjfk/opencode-voice",
-      {
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
         "sttEndpoint": "http://127.0.0.1:8000/v1",
         "sttModel": "whisper-large-v3-turbo",
         "sttApiKeyEnv": "MY_STT_API_KEY"
       }
-    ]
+    }
   ]
 }
 ```
@@ -319,17 +325,17 @@ The LLM system prompts used for normalization can be fully replaced by pointing
 to your own prompt files. This lets you fine-tune how transcriptions are cleaned
 up or how responses are spoken.
 
-```json
+```jsonc
 {
-  "plugin": [
-    [
-      "@renjfk/opencode-voice",
-      {
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
         "sttPrompt": "~/.config/opencode/stt-prompt.md",
         "ttsAutoPrompt": "~/.config/opencode/tts-auto-prompt.md",
         "ttsManualPrompt": "~/.config/opencode/tts-manual-prompt.md"
       }
-    ]
+    }
   ]
 }
 ```
@@ -363,8 +369,8 @@ outside the list can be set via the `sttLanguage` plugin option.
 
 ### Text-to-speech
 
-The `leader` key in OpenCode is `ctrl+x`. So `leader+s` means press `ctrl+x`
-then `s`.
+The `leader` key's active chord is `ctrl+x` by default (configurable via
+`keybinds.leader` in `cli.json`). So `leader+s` means press `ctrl+x` then `s`.
 
 | Command      | Keybind    | Description              |
 | ------------ | ---------- | ------------------------ |
@@ -431,15 +437,17 @@ npm run fmt:fix      # oxfmt --write
 
 ### Test local plugin in OpenCode
 
-To test unpublished changes in the OpenCode TUI, point `~/.config/opencode/tui.json`
-at the local repo path, not the npm package name:
+To test unpublished changes in the OpenCode TUI, point `opencode.jsonc` at the
+local repo path, not the npm package name:
 
-```json
+```jsonc
 {
-  "$schema": "https://opencode.ai/tui.json",
-  "plugin": ["/Users/your-user/opencode-voice"]
+  "plugins": ["/Users/your-user/opencode-voice"]
 }
 ```
+
+V2 discovers local plugins in `.opencode/plugins/` too — symlink or copy the
+package there if you prefer that instead of a `plugins` entry.
 
 ### Optional macOS Hammerspoon integration
 

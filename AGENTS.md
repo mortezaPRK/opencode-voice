@@ -9,10 +9,11 @@ Single TUI plugin exported from `index.js` with logic split into `lib/`.
 
 ## Key invariants
 
-- Single default export: `{ id, tui }`. No server-side plugin.
+- Single V2 CLI plugin via `Plugin.define({ id, setup })` in `index.js`. No server-side plugin.
 - LLM calls use the OpenAI chat completions API, not the Anthropic messages API.
-- Configuration uses `options` (static) and `api.kv` (runtime). No dotfile I/O.
+- Configuration uses `ctx.options` (static) and `ctx.storage` (runtime, `storage.store` reactive store). No dotfile I/O.
 - No build step. Plain ESM JavaScript, shipped as-is.
+- Audio/whisper/Piper logic lives in `lib/` and is OpenCode-API-agnostic; only `lib/session.js` and the `registerSTT`/`registerTTS` wiring touch the V2 context.
 
 ## Scripts
 
