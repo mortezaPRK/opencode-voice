@@ -5,14 +5,15 @@ only document constraints and rules an agent would get wrong without being told.
 
 ## Architecture
 
-Single V2 CLI plugin. TypeScript source in `src/` (`src/index.ts` +
-`src/lib/*.ts`), compiled with `tsc` to `dist/`. The published package ships
-`dist/` (`exports` -> `./dist/index.js`).
+V2 plugin package with two entries. TypeScript source in `src/`
+(`src/index.ts` server entry, `src/tui.ts` CLI plugin, `src/lib/*.ts`), compiled
+with `tsc` to `dist/`. The published package ships `dist/`:
+`exports["."]` -> `./dist/index.js`, `exports["./tui"]` -> `./dist/tui.js`.
 
 ## Key invariants
 
-- Single V2 CLI plugin via `Plugin.define({ id, setup })` in `src/index.ts`. No server-side plugin.
-- LLM calls use the OpenAI chat completions API, not the Anthropic messages API.
+- `src/index.ts` is a no-op server entry; the CLI plugin lives in `src/tui.ts`. Keep both exporting the same plugin id so package options apply on both sides.
+- LLM text generation supports two backends: OpenCode's `generate.text` and the OpenAI chat completions API. Neither uses the Anthropic messages API.
 - Configuration uses `ctx.options` (static) and `ctx.storage` (runtime, `storage.store` reactive store). No dotfile I/O.
 - TypeScript source is compiled to `dist/` with `tsc`; `dist/` is generated, not committed.
 - Audio/whisper/Piper logic lives in `src/lib/` and is OpenCode-API-agnostic; only `src/lib/session.ts` and the `registerSTT`/`registerTTS` wiring touch the V2 context.

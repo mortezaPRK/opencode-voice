@@ -30,8 +30,8 @@
       "import": "./dist/index.js"
     },
     "./tui": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
     }
   },
   "publishConfig": {
