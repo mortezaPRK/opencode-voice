@@ -6,13 +6,31 @@ import { Plugin } from "@opencode/plugin/tui";
 import { registerSTT } from "./lib/stt.js";
 import { registerTTS } from "./lib/tts.js";
 import { createClient } from "./lib/llm-client.js";
+import type { GenerateText } from "./lib/opencode-llm-client.js";
 import { createLogger } from "./lib/logger.js";
-import type { Logger, PluginOptions, Prompts, VoiceState } from "./types.js";
+import type { Context, Logger, PluginOptions, Prompts, VoiceState } from "./types.js";
 
 const DEFAULT_MODEL = "large-v3-turbo-q5_0";
 
 function resolvePath(filePath: string): string {
   return filePath.replace(/^~(?=\/|$)/, os.homedir());
+}
+
+/**
+ * Generate text through the host's OpenCode client. The request is scoped to
+ * the plugin location so project-level providers and models resolve.
+ */
+function openCodeGenerate(ctx: Pick<Context, "client" | "location">): GenerateText {
+  return ({ prompt, model, signal }) =>
+    ctx.client.generate.text(
+      { prompt, ...(model ? { model } : {}) },
+      {
+        ...(signal ? { signal } : {}),
+        ...(ctx.location
+          ? { headers: { "x-opencode-directory": encodeURIComponent(ctx.location.directory) } }
+          : {}),
+      },
+    );
 }
 
 function loadPromptFile(filePath: string | undefined, logger: Logger, name: string): string | null {
@@ -43,7 +61,9 @@ export default Plugin.define({
     const logger = createLogger(ctx.client);
     logger.log("plugin", "Initializing", "debug");
 
-    const { complete } = createClient(opts, logger);
+    const { complete, backend, error } = createClient(opts, logger, openCodeGenerate(ctx));
+    logger.log("LLM", `Backend=${backend}`, "debug");
+    if (error) logger.log("LLM", `Configuration error: ${error}`, "warn");
 
     const prompts: Prompts = {
       stt: loadPromptFile(opts.sttPrompt, logger, "STT"),

@@ -48,7 +48,44 @@ export interface Prompts {
   ttsManual: string | null;
 }
 
+export interface OpenCodeModelRef {
+  providerID: string;
+  id: string;
+  variant?: string;
+}
+
+/**
+ * Use OpenCode's configured providers and authentication. `model` defaults to
+ * OpenCode's default model.
+ */
+export interface OpenCodeLLMOptions {
+  type: "opencode";
+  model?: OpenCodeModelRef;
+  /** Request timeout in milliseconds (default 60000). */
+  timeoutMs?: number;
+}
+
+/** Call an OpenAI-compatible `/chat/completions` endpoint directly. */
+export interface OpenAICompatibleLLMOptions {
+  type: "openai-compatible";
+  endpoint?: string;
+  model?: string;
+  apiKeyEnv?: string;
+  maxTokens?: number;
+  reasoningEffort?: string | null;
+  chatTemplateKwargs?: Record<string, unknown> | string | null;
+  retries?: number;
+}
+
+export type LLMOptions = OpenCodeLLMOptions | OpenAICompatibleLLMOptions;
+
 export interface PluginOptions {
+  /**
+   * Text-generation backend. Explicit `llm` options take precedence over the
+   * legacy top-level endpoint fields.
+   */
+  llm?: LLMOptions;
+  /** Legacy OpenAI-compatible endpoint (used when `llm` is absent). */
   endpoint?: string;
   model?: string;
   apiKeyEnv?: string;

@@ -15,8 +15,8 @@ code-heavy responses, etc.).
 ## Install
 
 This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
-`opencode.jsonc` under `plugins`. You must configure at least `endpoint` and
-`model`:
+`opencode.jsonc` under `plugins`. By default the plugin reuses the model and
+credentials already configured in OpenCode:
 
 > [!TIP]
 > The plugin is CLI-only (voices STT/TTS). To keep it active even against remote
@@ -29,14 +29,18 @@ This is a **V2 CLI plugin** for OpenCode. Add it to the project/global
     {
       "package": "@mortz.prk/opencode-voice",
       "options": {
-        "endpoint": "https://api.anthropic.com/v1",
-        "model": "claude-haiku-4-5",
-        "apiKeyEnv": "ANTHROPIC_API_KEY",
+        "llm": {
+          "type": "opencode",
+          "model": { "providerID": "anthropic", "id": "claude-sonnet-4-6" },
+        },
       },
     },
   ],
 }
 ```
+
+Omit `llm.model` to use OpenCode's default model. An OpenAI-compatible
+endpoint can be configured instead; see [LLM backend](#llm-backend).
 
 > [!NOTE]
 > **Keybind conflict.** This plugin uses `ctrl+r` for voice recording, which
@@ -232,15 +236,49 @@ curl -L -o ~/.local/share/piper-voices/en_US-ryan-high.onnx.json \
   https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/ryan/high/en_US-ryan-high.onnx.json
 ```
 
-### LLM endpoint
+### LLM backend
 
-An OpenAI-compatible LLM endpoint is required for text normalization. For
-speech-to-text it cleans up whisper output (punctuation, filler words, software
-engineering homophones). For text-to-speech it converts markdown into natural
-spoken text.
+Text normalization needs a text-generation model. For speech-to-text it cleans
+up whisper output (punctuation, filler words, software engineering homophones).
+For text-to-speech it converts markdown into natural spoken text.
 
-Configure your endpoint in `opencode.jsonc` via plugin options. Any
-OpenAI-compatible endpoint works (Anthropic, OpenAI, Ollama, vLLM, LM Studio,
+Two backends are supported. Explicit `llm` options take precedence over the
+legacy top-level fields.
+
+#### OpenCode providers (recommended)
+
+Reuse the providers, models, and credentials already configured in OpenCode. No
+API key needs to be repeated in the plugin options.
+
+```jsonc
+{
+  "plugins": [
+    {
+      "package": "@mortz.prk/opencode-voice",
+      "options": {
+        "llm": {
+          "type": "opencode",
+          "model": { "providerID": "anthropic", "id": "claude-sonnet-4-6" },
+        },
+      },
+    },
+  ],
+}
+```
+
+- `model` _(optional)_ - `providerID`, `id`, and optional `variant`. Omit it to
+  use OpenCode's default model
+- `timeoutMs` _(optional)_ - request timeout in milliseconds (default `60000`)
+
+Generation settings such as token limits and reasoning effort come from the
+OpenCode model configuration. `endpoint`, `maxTokens`, `reasoningEffort`,
+`chatTemplateKwargs`, `apiKeyEnv`, and `retries` are rejected under
+`llm.type: "opencode"` so the configuration cannot silently diverge from what
+OpenCode applies.
+
+#### OpenAI-compatible endpoint
+
+Any OpenAI-compatible endpoint works (Anthropic, OpenAI, Ollama, vLLM, LM Studio,
 etc.). The `apiKeyEnv` option is optional - omit it for unauthenticated
 endpoints like Ollama.
 
@@ -250,9 +288,12 @@ endpoints like Ollama.
     {
       "package": "@mortz.prk/opencode-voice",
       "options": {
-        "endpoint": "https://api.anthropic.com/v1",
-        "model": "claude-haiku-4-5",
-        "apiKeyEnv": "ANTHROPIC_API_KEY",
+        "llm": {
+          "type": "openai-compatible",
+          "endpoint": "https://api.anthropic.com/v1",
+          "model": "claude-haiku-4-5",
+          "apiKeyEnv": "ANTHROPIC_API_KEY",
+        },
       },
     },
   ],
@@ -267,8 +308,11 @@ For unauthenticated local endpoints (e.g. Ollama):
     {
       "package": "@mortz.prk/opencode-voice",
       "options": {
-        "endpoint": "http://localhost:11434/v1",
-        "model": "llama3.2",
+        "llm": {
+          "type": "openai-compatible",
+          "endpoint": "http://localhost:11434/v1",
+          "model": "llama3.2",
+        },
       },
     },
   ],
@@ -282,6 +326,16 @@ For unauthenticated local endpoints (e.g. Ollama):
 - `reasoningEffort` _(optional)_ - reasoning level for models that support it
 - `chatTemplateKwargs` _(optional)_ - extra keyword arguments passed to the model's chat template (e.g. `{"enable_thinking": false}` for Qwen models to disable chain-of-thought)
 - `retries` _(optional)_ - number of retry attempts for transient LLM failures
+
+#### Legacy configuration
+
+Configurations without `llm` keep working: `endpoint`, `model`, `apiKeyEnv`,
+`maxTokens`, `reasoningEffort`, `chatTemplateKwargs`, and `retries` at the top
+level are treated as the OpenAI-compatible backend. New configurations should
+use `llm.type: "openai-compatible"` instead.
+
+#### Other options
+
 - `tmpDir` _(optional)_ - directory used for the temporary STT recording file (default `/tmp`)
 - `sttLanguage` _(optional)_ - spoken language passed to local `whisper-cli -l` (default `auto`; any whisper.cpp language code, e.g. `en`, `zh`). Can be changed at runtime via `/stt-language`
 - `trimSilence` _(optional)_ - whether to remove leading silence from recordings (default `true`). Set to `false` if your recordings are missing the first word or syllable
@@ -392,9 +446,9 @@ The `leader` key's active chord is `ctrl+x` by default (configurable via
    corrects software engineering homophones ("Jason" to "JSON", "bullion" to
    "boolean", etc.)
 4. Cleaned text is appended to the OpenCode prompt, or submitted immediately
-   when `/stt-submit` is used. If normalization fails (e.g. LLM endpoint
-   unreachable), the raw transcription is used as a fallback so you never lose
-   your input
+   when `/stt-submit` is used. If normalization fails (e.g. the configured LLM
+   backend is unreachable), the raw transcription is used as a fallback so you
+   never lose your input
 
 ### TTS pipeline
 
