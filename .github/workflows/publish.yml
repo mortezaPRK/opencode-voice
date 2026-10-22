@@ -34,7 +34,7 @@ jobs:
           registry-url: https://registry.npmjs.org
           scope: "@mortz.dev"
       - run: npm install --global npm@11
-      - run: npm ci
+      - run: npm ci --ignore-scripts
       - run: npm test
       - run: npm run lint
       - run: npm run typecheck
