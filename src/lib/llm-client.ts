@@ -1,7 +1,9 @@
-// OpenAI-compatible LLM client for text normalization.
+// OpenAI-compatible LLM client for text normalization, plus backend selection.
 //
 // Works with any OpenAI-compatible endpoint (Anthropic compat layer, OpenAI,
 // Ollama, vLLM, LM Studio, etc.). Configuration is passed from plugin options.
+// When `llm.type` is "opencode", generation is delegated to the host's
+// `generate.text` API instead of calling an endpoint directly.
 import type {
   Complete,
   CompletionRequest,
@@ -9,43 +11,18 @@ import type {
   Logger,
   PluginOptions,
 } from "../types.js";
+import {
+  resolveLLMConfig,
+  type LLMBackend,
+  type ResolvedOpenAICompatibleOptions,
+} from "./llm-config.js";
+import { createOpenCodeClient, type GenerateText } from "./opencode-llm-client.js";
 
-interface ResolvedConfig {
-  endpoint?: string;
-  model?: string;
-  apiKeyEnv?: string;
-  maxTokens: number;
-  reasoningEffort: string | null;
-  chatTemplateKwargs: Record<string, unknown> | null;
-  retries: number;
-}
-
-const DEFAULTS: ResolvedConfig = {
-  maxTokens: 2048,
-  reasoningEffort: null,
-  chatTemplateKwargs: null,
-  retries: 2,
-};
-
-function normalizeRetries(value: number | undefined): number {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULTS.retries;
-  return Math.floor(parsed);
-}
-
-function normalizeChatTemplateKwargs(
-  value: Record<string, unknown> | string | null | undefined,
-): Record<string, unknown> | null {
-  if (!value) return null;
-  if (typeof value === "object") return value;
-  try {
-    const parsed = JSON.parse(value);
-    return typeof parsed === "object" && !Array.isArray(parsed)
-      ? (parsed as Record<string, unknown>)
-      : null;
-  } catch {
-    return null;
-  }
+export interface CompletionClient {
+  backend: LLMBackend;
+  complete: Complete;
+  /** Configuration error reported by `complete` on every call. */
+  error?: string;
 }
 
 function shouldRetry(status: number): boolean {
@@ -56,37 +33,31 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function createErrorClient(error: string, logger?: Logger): { complete: Complete } {
+  let logged = false;
+  return {
+    complete: async () => {
+      if (!logged) {
+        logger?.log("LLM", `Invalid configuration: ${error}`, "warn");
+        logged = true;
+      }
+      return { text: null, error };
+    },
+  };
+}
+
 /**
- * Create an LLM completion function.
+ * Create an LLM completion function for an OpenAI-compatible endpoint.
  */
-export function createClient(
-  pluginOptions: PluginOptions | undefined,
+export function createOpenAICompatibleClient(
+  cfg: ResolvedOpenAICompatibleOptions,
   logger?: Logger,
 ): { complete: Complete } {
-  function getConfig(): ResolvedConfig {
-    return {
-      endpoint: pluginOptions?.endpoint,
-      model: pluginOptions?.model,
-      apiKeyEnv: pluginOptions?.apiKeyEnv,
-      maxTokens: pluginOptions?.maxTokens ?? DEFAULTS.maxTokens,
-      reasoningEffort: pluginOptions?.reasoningEffort ?? DEFAULTS.reasoningEffort,
-      chatTemplateKwargs: normalizeChatTemplateKwargs(
-        pluginOptions?.chatTemplateKwargs ?? DEFAULTS.chatTemplateKwargs,
-      ),
-      retries: normalizeRetries(pluginOptions?.retries ?? DEFAULTS.retries),
-    };
-  }
-
   async function complete({
     system,
     prompt,
     config: overrides,
   }: CompletionRequest): Promise<CompletionResult> {
-    const base = getConfig();
-    const cfg: ResolvedConfig = {
-      ...base,
-      maxTokens: overrides?.maxTokens ?? base.maxTokens,
-    };
     if (!cfg.endpoint) {
       logger?.log("LLM", "completion skipped: endpoint not configured", "warn");
       return { text: null, error: "LLM endpoint not configured" };
@@ -95,6 +66,7 @@ export function createClient(
       logger?.log("LLM", "completion skipped: model not configured", "warn");
       return { text: null, error: "LLM model not configured" };
     }
+    const maxTokens = overrides?.maxTokens ?? cfg.maxTokens;
     const apiKey = cfg.apiKeyEnv ? process.env[cfg.apiKeyEnv] : null;
 
     const endpoint = cfg.endpoint.replace(/\/+$/, "") + "/chat/completions";
@@ -105,7 +77,7 @@ export function createClient(
 
     const body: Record<string, unknown> = {
       model: cfg.model,
-      max_tokens: cfg.maxTokens,
+      max_tokens: maxTokens,
       messages,
     };
     if (cfg.reasoningEffort) body.reasoning_effort = cfg.reasoningEffort;
@@ -115,7 +87,7 @@ export function createClient(
       try {
         logger?.log(
           "LLM",
-          `Completion request attempt=${attempt + 1} model=${cfg.model} maxTokens=${cfg.maxTokens} promptChars=${prompt.length}`,
+          `Completion request attempt=${attempt + 1} model=${cfg.model} maxTokens=${maxTokens} promptChars=${prompt.length}`,
           "debug",
         );
         const response = await fetch(endpoint, {
@@ -171,4 +143,47 @@ export function createClient(
   }
 
   return { complete };
+}
+
+/**
+ * Create the configured completion client.
+ *
+ * `generate` is required only for the "opencode" backend; it is supplied by the
+ * plugin from the host context so this module stays independent of OpenCode APIs.
+ */
+export function createClient(
+  pluginOptions: PluginOptions | undefined,
+  logger?: Logger,
+  generate?: GenerateText,
+): CompletionClient {
+  const resolved = resolveLLMConfig(pluginOptions);
+  for (const warning of resolved.warnings) logger?.log("LLM", warning, "warn");
+
+  if (resolved.error) {
+    return {
+      backend: resolved.backend,
+      complete: createErrorClient(resolved.error, logger).complete,
+      error: resolved.error,
+    };
+  }
+
+  if (resolved.backend === "opencode") {
+    if (!generate) {
+      const error = "OpenCode LLM backend requires the OpenCode client";
+      return {
+        backend: "opencode",
+        complete: createErrorClient(error, logger).complete,
+        error,
+      };
+    }
+    return {
+      backend: "opencode",
+      ...createOpenCodeClient(generate, resolved.opencode, logger),
+    };
+  }
+
+  return {
+    backend: "openai-compatible",
+    ...createOpenAICompatibleClient(resolved.openai, logger),
+  };
 }
